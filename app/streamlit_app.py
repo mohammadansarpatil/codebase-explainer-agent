@@ -1,6 +1,9 @@
 import streamlit as st
 import requests
 
+OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_MODEL = "llama3.1:8b"
+
 st.set_page_config(page_title="Codebase Explainer Agent", layout="wide")
 
 st.title("🧠 Codebase Explainer Agent")
@@ -23,14 +26,14 @@ st.divider()
 # --- LLM Ping (Day 1 task) ---
 st.subheader("Local LLM Test (Ollama)")
 
-model_name = st.text_input("Ollama model name", value="llama3.1:8b")
+model_name = st.text_input("Ollama model name", value=DEFAULT_MODEL)
 user_msg = st.text_input("Message to model", value="You are running locally via Ollama. Reply in one sentence: confirm you are reachable and ready to answer codebase questions.")
 
 def ollama_chat(model: str, message: str) -> str:
     """
     Calls Ollama's local chat endpoint and returns the assistant response text.
     """
-    url = "http://localhost:11434/api/chat"
+    url = f"{OLLAMA_BASE_URL}/api/chat"
     payload = {
         "model": model,
         "messages": [
