@@ -3,6 +3,7 @@ from pathlib import Path
 
 from ingest.clone import clone_repo
 from ingest.filter import list_source_files
+from ingest.loader import load_documents
 
 
 def main():
@@ -29,6 +30,12 @@ def main():
     print("\nSample kept files:")
     for p in files[:20]:
         print("-", p)
+
+    docs = load_documents(Path(result.local_path), files)
+    print("\n--- Loaded Docs ---")
+    print("Docs loaded:", len(docs))
+    print("First doc rel_path:", docs[0].rel_path)
+    print("First doc chars:", len(docs[0].text))
 
 
 if __name__ == "__main__":
