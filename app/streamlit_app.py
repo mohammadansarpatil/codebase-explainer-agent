@@ -1,8 +1,7 @@
 import streamlit as st
 import requests
 
-OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "llama3.1:8b"
+from app.config import OLLAMA_BASE_URL, DEFAULT_MODEL
 
 st.set_page_config(page_title="Codebase Explainer Agent", layout="wide")
 
