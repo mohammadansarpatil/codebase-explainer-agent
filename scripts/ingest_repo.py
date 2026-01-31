@@ -4,6 +4,7 @@ from pathlib import Path
 from ingest.clone import clone_repo
 from ingest.filter import list_source_files
 from ingest.loader import load_documents
+from ingest.repo_map import build_repo_map
 
 
 def main():
@@ -37,6 +38,12 @@ def main():
     print("First doc rel_path:", docs[0].rel_path)
     print("First doc chars:", len(docs[0].text))
 
+    repo_map = build_repo_map(Path(result.local_path), files)
+    print("\n--- Repo Map ---")
+    print("Top-level dirs:", repo_map.top_level_dirs)
+    print("Important files:", repo_map.important_files[:10])
+    print("Likely entrypoints:", repo_map.likely_entrypoints)
+    print("Top extensions:", list(repo_map.ext_counts.items())[:8])
 
 if __name__ == "__main__":
     main()
