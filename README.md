@@ -12,4 +12,11 @@ Autonomous agent that ingests a GitHub repository, builds a local code search in
 - Streamlit UI
 
 ## Local Setup (WIP)
+
+### 1) Create venv & install deps
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
 Will be added as the project progresses.
