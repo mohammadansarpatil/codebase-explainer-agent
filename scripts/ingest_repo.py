@@ -6,6 +6,10 @@ from ingest.filter import list_source_files
 from ingest.loader import load_documents
 from ingest.repo_map import build_repo_map
 from ingest.chunk import chunk_documents
+from rag.embed import Embedder
+from rag.index import build_faiss_index, persist_index
+from rag.retrieve import retrieve
+import hashlib
 
 def main():
     parser = argparse.ArgumentParser()
@@ -55,6 +59,37 @@ def main():
     print("Sample chunks:")
     for c in chunks[:5]:
         print("-", c.chunk_id, "|", c.rel_path)
+
+    # --- Build embeddings + FAISS index ---
+    embedder = Embedder()
+
+    chunk_texts = [c.text for c in chunks]
+    embeddings = embedder.encode(chunk_texts)
+
+    index = build_faiss_index(embeddings)
+
+    # Stable index folder name based on repo url
+    repo_id = hashlib.sha1(result.repo_url.encode("utf-8")).hexdigest()[:12]
+    index_dir = Path("data/indexes") / repo_id
+    persist_index(index_dir, index, chunks)
+
+    print("\n--- Index Built ---")
+    print("Index dir:", index_dir)
+    print("Vectors:", embeddings.shape)
+
+    # --- Test retrieval ---
+    query = "How does HTTP request sending work?"
+    qvec = embedder.encode([query])[0]
+    hits = retrieve(index_dir, qvec, k=5)
+
+    print("\n--- Retrieval Test ---")
+    print("Query:", query)
+    for h in hits:
+        span = f"{h['rel_path']}:{h['start_line']}-{h['end_line']}"
+        sym = h["symbol"]
+        sc = round(h["score"], 4)
+        rsc = round(h.get("reranked_score", h["score"]), 4)
+        print("-", span, "|", sym, "| score:", sc, "| reranked:", rsc)
 
 if __name__ == "__main__":
     main()
