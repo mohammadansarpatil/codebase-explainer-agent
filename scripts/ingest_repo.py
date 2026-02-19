@@ -47,10 +47,14 @@ def main():
 
     chunks = chunk_documents(docs)
     print("\n--- Chunking (Python AST) ---")
-    print("Total python chunks:", len(chunks))
+    print("Total chunks:", len(chunks))
     if chunks:
         print("Sample chunk:", chunks[0].chunk_id)
         print("Sample chunk lines:", f"{chunks[0].start_line}-{chunks[0].end_line}")
+
+    print("Sample chunks:")
+    for c in chunks[:5]:
+        print("-", c.chunk_id, "|", c.rel_path)
 
 if __name__ == "__main__":
     main()
