@@ -10,6 +10,8 @@ from rag.embed import Embedder
 from rag.index import build_faiss_index, persist_index
 from rag.retrieve import retrieve
 import hashlib
+from llm.ollama_client import OllamaClient
+from rag.answer import answer_question
 
 def main():
     parser = argparse.ArgumentParser()
@@ -90,6 +92,19 @@ def main():
         sc = round(h["score"], 4)
         rsc = round(h.get("reranked_score", h["score"]), 4)
         print("-", span, "|", sym, "| score:", sc, "| reranked:", rsc)
+
+    print("\n--- RAG Answer Test (Ollama) ---")
+    ollama = OllamaClient(model="llama3.1:8b")
+
+    final = answer_question(
+        llm_chat=ollama.chat,
+        repo_root=Path(result.local_path),
+        index_dir=index_dir,
+        embedder=embedder,
+        question="How does HTTP request sending work?"
+    )
+    print(final)
+
 
 if __name__ == "__main__":
     main()

@@ -65,4 +65,4 @@ def retrieve(index_dir: Path, query_vec: np.ndarray, k: int = 12) -> List[dict]:
             r["reranked_score"] = r["score"]
 
     results.sort(key=lambda x: x["reranked_score"], reverse=True)
-    return results[:8]
+    return results
