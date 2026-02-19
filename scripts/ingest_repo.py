@@ -5,7 +5,7 @@ from ingest.clone import clone_repo
 from ingest.filter import list_source_files
 from ingest.loader import load_documents
 from ingest.repo_map import build_repo_map
-
+from ingest.chunk import chunk_documents
 
 def main():
     parser = argparse.ArgumentParser()
@@ -44,6 +44,13 @@ def main():
     print("Important files:", repo_map.important_files[:10])
     print("Likely entrypoints:", repo_map.likely_entrypoints)
     print("Top extensions:", list(repo_map.ext_counts.items())[:8])
+
+    chunks = chunk_documents(docs)
+    print("\n--- Chunking (Python AST) ---")
+    print("Total python chunks:", len(chunks))
+    if chunks:
+        print("Sample chunk:", chunks[0].chunk_id)
+        print("Sample chunk lines:", f"{chunks[0].start_line}-{chunks[0].end_line}")
 
 if __name__ == "__main__":
     main()
