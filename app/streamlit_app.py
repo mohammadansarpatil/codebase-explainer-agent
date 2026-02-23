@@ -1,69 +1,105 @@
-import streamlit as st
-import requests
+import os
+import sys
+from pathlib import Path
 
-from app.config import OLLAMA_BASE_URL, DEFAULT_MODEL
+import streamlit as st
+
+# Ensure project root is importable
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from llm.ollama_client import OllamaClient
+from rag.embed import Embedder
+from rag.answer import answer_question
+from app.pipeline import build_index_for_repo
+from app.ui_state import index_dir_for
+
 
 st.set_page_config(page_title="Codebase Explainer Agent", layout="wide")
-
 st.title("🧠 Codebase Explainer Agent")
-st.write("Day 1: Streamlit UI + Local LLM (Ollama) ✅")
 
-# --- Repo input (we'll use this in Day 2) ---
-repo_url = st.text_input(
-    "GitHub Repository URL",
-    placeholder="https://github.com/owner/repo"
-)
+# Sidebar config
+st.sidebar.header("LLM Settings")
+model_name = st.sidebar.text_input("Ollama model", value="llama3.1:8b")
+ollama_url = st.sidebar.text_input("Ollama URL", value="http://localhost:11434")
 
-if st.button("Test Input"):
-    if repo_url.strip():
-        st.success(f"Got URL: {repo_url}")
+st.sidebar.header("Repo")
+repo_url = st.sidebar.text_input("GitHub Repo URL", placeholder="https://github.com/owner/repo")
+update_repo = st.sidebar.checkbox("Pull latest if already cloned", value=False)
+
+tabs = st.tabs(["1) Ingest", "2) Chat"])
+
+# Cache embedder so it loads once
+@st.cache_resource
+def get_embedder():
+    return Embedder()
+
+@st.cache_resource
+def get_ollama_client(base_url: str, model: str):
+    return OllamaClient(base_url=base_url, model=model)
+
+
+with tabs[0]:
+    st.subheader("Ingest repository and build index")
+
+    if not repo_url.strip():
+        st.info("Enter a GitHub repo URL in the sidebar.")
     else:
-        st.warning("Please enter a repository URL.")
+        index_dir = index_dir_for(repo_url)
 
-st.divider()
+        st.write("Index location:", str(index_dir))
 
-# --- LLM Ping (Day 1 task) ---
-st.subheader("Local LLM Test (Ollama)")
+        if index_dir.exists():
+            st.success("Index already exists ✅ (you can go to Chat tab)")
+        else:
+            st.warning("No index found yet.")
 
-model_name = st.text_input("Ollama model name", value=DEFAULT_MODEL)
-user_msg = st.text_input("Message to model", value="You are running locally via Ollama. Reply in one sentence: confirm you are reachable and ready to answer codebase questions.")
+        if st.button("Build / Rebuild Index"):
+            with st.spinner("Cloning + chunking + embedding + indexing..."):
+                repo_root, index_dir = build_index_for_repo(repo_url, update=update_repo)
+            st.success(f"Index built at {index_dir} ✅")
 
-def ollama_chat(model: str, message: str) -> str:
-    """
-    Calls Ollama's local chat endpoint and returns the assistant response text.
-    """
-    url = f"{OLLAMA_BASE_URL}/api/chat"
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": message}
-        ],
-        "stream": False
-    }
+with tabs[1]:
+    st.subheader("Ask questions about the codebase")
 
-    resp = requests.post(url, json=payload, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["message"]["content"]
-
-if st.button("Ping Ollama"):
-    if not model_name.strip():
-        st.error("Please enter a model name (e.g., llama3.1:8b).")
-    elif not user_msg.strip():
-        st.error("Please enter a message.")
+    if not repo_url.strip():
+        st.info("Enter a GitHub repo URL in the sidebar and ingest it first.")
     else:
-        try:
-            with st.spinner("Calling Ollama locally..."):
-                answer = ollama_chat(model_name.strip(), user_msg.strip())
-            st.success("Model responded ✅")
-            st.text_area("Response", value=answer, height=200)
-        except requests.exceptions.ConnectionError:
-            st.error(
-                "Could not connect to Ollama. Make sure Ollama is running:\n\n"
-                "1) In another terminal: `ollama serve`\n"
-                "2) Then try again."
-            )
-        except requests.HTTPError as e:
-            st.error(f"Ollama returned an HTTP error: {e}")
-        except Exception as e:
-            st.error(f"Unexpected error: {e}")
+        index_dir = index_dir_for(repo_url)
+        if not index_dir.exists():
+            st.warning("Index not built yet. Go to Ingest tab first.")
+        else:
+            question = st.text_input("Your question", value="How does HTTP request sending work?")
+            if st.button("Answer"):
+                embedder = get_embedder()
+                ollama = get_ollama_client(ollama_url, model_name)
+
+                repo_id = index_dir.name
+                repo_root = Path("data/repos")  # we will infer actual clone path later
+
+                # For now, infer repo root by scanning data/repos for owner__repo folder.
+                # (Simple week-1 approach; we can store this mapping cleanly later.)
+                # We'll just pick the newest folder if multiple exist.
+                repo_candidates = sorted(Path("data/repos").glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                if not repo_candidates:
+                    st.error("No cloned repo found in data/repos. Please build index again.")
+                else:
+                    repo_root = repo_candidates[0]
+
+                with st.spinner("Retrieving + generating answer..."):
+                    answer, sources = answer_question(
+                        llm_chat=ollama.chat,
+                        repo_root=repo_root,
+                        index_dir=index_dir,
+                        embedder=embedder,
+                        question=question,
+                    )
+
+                st.markdown("### Answer")
+                st.write(answer)
+
+                st.markdown("### Sources used")
+                for s in sources:
+                    with st.expander(f"{s.rel_path}:{s.start_line}-{s.end_line} | {s.symbol}"):
+                        st.code(s.text)

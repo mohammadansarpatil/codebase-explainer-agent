@@ -12,6 +12,8 @@ from rag.retrieve import retrieve
 import hashlib
 from llm.ollama_client import OllamaClient
 from rag.answer import answer_question
+from rag.architecture import explain_architecture
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -104,6 +106,10 @@ def main():
         question="How does HTTP request sending work?"
     )
     print(final)
+
+    print("\n--- Architecture Mode ---")
+    arch = explain_architecture(ollama.chat, repo_root=Path(result.local_path))
+    print(arch)
 
 
 if __name__ == "__main__":
