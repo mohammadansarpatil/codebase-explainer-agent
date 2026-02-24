@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import List
 
@@ -145,10 +147,151 @@ def pick_hotspot_chunks(
     return picked[:max_chunks]
 
 
-def explain_architecture(llm_chat, repo_root: Path, debug_print_sources: bool = True) -> str:
+def safe_parse_json(raw: str) -> dict:
     """
-    Architecture overview with reliable citations via source IDs [S1], [S2], ...
-    Works across arbitrary repos (not FastAPI-specific).
+    Parse JSON even if the model adds extra text.
+    Tries:
+    1) direct json.loads
+    2) extract first {...} block
+    """
+    if raw is None:
+        raise ValueError("LLM returned None")
+
+    s = raw.strip()
+    if not s:
+        raise ValueError("LLM returned empty string")
+
+    # 1) direct parse
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # 2) extract first JSON object block
+    match = re.search(r"\{.*\}", s, flags=re.DOTALL)
+    if match:
+        obj = json.loads(match.group(0))
+        if isinstance(obj, dict):
+            return obj
+
+    raise ValueError("Could not parse JSON from LLM output")
+
+def sanitize_arch_json(parsed: dict, catalog: list[dict], target_modules: int = 6) -> dict:
+    """
+    Ensure:
+    - module paths exist in catalog
+    - citations belong to the same file path
+    - key_symbols align with the same file path
+    - always returns exactly `target_modules` modules (backfilled deterministically)
+    """
+    # Map source id -> (path, symbol)
+    sid_to_path: dict[str, str] = {}
+    sid_to_symbol: dict[str, str] = {}
+    path_to_sids: dict[str, list[str]] = {}
+    path_to_symbols: dict[str, list[str]] = {}
+
+    for item in catalog:
+        sid = item["id"]
+        path = item["ref"].split(":")[0]  # file path
+        sym = item["symbol"]
+
+        sid_to_path[sid] = path
+        sid_to_symbol[sid] = sym
+        path_to_sids.setdefault(path, []).append(sid)
+        path_to_symbols.setdefault(path, []).append(sym)
+
+    valid_paths = set(path_to_sids.keys())
+
+    modules = parsed.get("modules", [])
+    if not isinstance(modules, list):
+        modules = []
+
+    cleaned: list[dict] = []
+    used_paths: set[str] = set()
+
+    for m in modules:
+        if not isinstance(m, dict):
+            continue
+
+        path = (m.get("path") or "").lstrip("/")  # normalize "/fastapi/x.py" -> "fastapi/x.py"
+        if not path or path not in valid_paths:
+            continue
+        if path in used_paths:
+            continue
+
+        # Keep only citations that actually belong to this file
+        citations = m.get("citations", [])
+        if not isinstance(citations, list):
+            citations = []
+        citations = [c for c in citations if c in sid_to_path and sid_to_path[c] == path]
+
+        # If model gave none/incorrect, pick the first catalog source for that path
+        if not citations:
+            citations = [path_to_sids[path][0]]
+
+        # Key symbols: keep only those appearing in this path’s catalog symbols
+        key_symbols = m.get("key_symbols", [])
+        if not isinstance(key_symbols, list):
+            key_symbols = []
+        allowed_syms = set(path_to_symbols.get(path, []))
+        key_symbols = [s for s in key_symbols if s in allowed_syms]
+
+        # If empty, derive from the first citation’s symbol
+        if not key_symbols:
+            sym = sid_to_symbol[citations[0]]
+            # Replace FILE_HEADER with file stem (better UI)
+            if sym == "FILE_HEADER":
+                sym = Path(path).stem
+            key_symbols = [sym]
+
+        responsibility = (m.get("responsibility") or "").strip()
+        if not responsibility:
+            responsibility = f"Core module containing {key_symbols[0]}."
+
+        cleaned.append(
+            {
+                "path": path,
+                "responsibility": responsibility,
+                "key_symbols": key_symbols[:3],
+                "citations": citations[:3],
+            }
+        )
+        used_paths.add(path)
+
+        if len(cleaned) >= target_modules:
+            break
+
+    # Backfill deterministically from catalog if we have < target_modules
+    if len(cleaned) < target_modules:
+        for path in sorted(valid_paths):
+            if path in used_paths:
+                continue
+            sid = path_to_sids[path][0]
+            sym = sid_to_symbol[sid]
+            if sym == "FILE_HEADER":
+                sym = Path(path).stem
+
+            cleaned.append(
+                {
+                    "path": path,
+                    "responsibility": f"Core module containing {sym}.",
+                    "key_symbols": [sym],
+                    "citations": [sid],
+                }
+            )
+            used_paths.add(path)
+            if len(cleaned) >= target_modules:
+                break
+
+    return {"modules": cleaned[:target_modules]}
+
+
+def explain_architecture_with_sources(llm_chat, repo_root: Path, max_chunks: int = 18):
+    """
+    Returns (arch_json_dict, catalog_items)
+    catalog_items: list of dicts {id, ref, symbol, text}
     """
     repo_root = repo_root.resolve()
 
@@ -158,50 +301,111 @@ def explain_architecture(llm_chat, repo_root: Path, debug_print_sources: bool = 
     docs = load_documents(repo_root, files)
     chunks = chunk_documents(docs)
 
-    hotspots = pick_hotspot_chunks(repo_root, chunks, packages, max_chunks=18)
+    hotspots = pick_hotspot_chunks(repo_root, chunks, packages, max_chunks=max_chunks)
 
-    # Build a strict source catalog with IDs
-    catalog_blocks: List[str] = []
+    # Build catalog
+    catalog: list[dict] = []
     for i, c in enumerate(hotspots, start=1):
         sid = f"S{i}"
         ref = f"{c.rel_path}:{c.start_line}-{c.end_line}"
         sym = c.symbol
         text = c.text.strip()
-        if len(text) > 1200:
-            text = text[:1200] + "\n... (truncated)"
-        catalog_blocks.append(f"[{sid}] {ref} | {sym}\n{text}\n")
+        if len(text) > 2000:
+            text = text[:2000] + "\n... (truncated)"
+        catalog.append({"id": sid, "ref": ref, "symbol": sym, "text": text})
 
-    context = "\n".join(catalog_blocks)
-
-    if debug_print_sources:
-        print("\n[ARCH SOURCES CATALOG]")
-        for i, c in enumerate(hotspots, start=1):
-            print(f"- [S{i}] {c.rel_path}:{c.start_line}-{c.end_line} | {c.symbol}")
+    # ✅ Build compact SOURCES list (metadata only)
+    catalog_lines = [
+        f"{item['id']} | {item['ref']} | {item['symbol']}"
+        for item in catalog
+    ]
+    context = "\n".join(catalog_lines)
 
     system = (
-    "You are a codebase architect.\n"
-    "Use ONLY the SOURCES below.\n\n"
-    "You MUST cite using the source IDs exactly like [S1], [S2] at the end of every bullet.\n"
-    "Never use the phrase 'not shown in sources'. If it isn't in sources, omit it.\n\n"
-    "You MUST output EXACTLY this structure for each module (repeat 5-8 times):\n"
-    "Module: <exact file path from sources>\n"
-    "- Responsibility: <one sentence> [S#]\n"
-    "- Key symbols: <comma-separated symbols> [S#]\n\n"
-    "Rules:\n"
-    "- 'Module' must match a file path that appears in SOURCES (e.g., fastapi/routing.py).\n"
-    "- Do not invent symbols.\n"
+        "You are a codebase architect.\n"
+        "Use ONLY the SOURCES list.\n"
+        "Return ONLY JSON.\n"
+        "You MUST return exactly 6 modules.\n"
+        "Do not return an empty list.\n"
+        "Schema:\n"
+        '{"modules":[{"path":"...","responsibility":"...","key_symbols":["..."],"citations":["S1"]}]}\n'
     )
 
     user = (
-        "Create an architecture overview of this repository.\n"
-        "Prefer these areas when applicable: entrypoints, app initialization, routing, services, "
-        "dependency injection, config, schema/OpenAPI, exception handling.\n\n"
+        "Pick exactly 6 core modules that best represent the repo architecture.\n"
+        "Rules:\n"
+        "- Each module must come from a DIFFERENT file path.\n"
+        "- path must match the file path in SOURCES.\n"
+        "- citations must reference the source IDs used (e.g. S3).\n"
+        "- key_symbols must be the symbol names from SOURCES (e.g. FastAPI, request_response).\n"
+        "- responsibility: one short sentence.\n\n"
         f"SOURCES:\n{context}"
     )
 
-    return llm_chat(
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-    )
+    def _ask() -> str:
+        return llm_chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            format="json",
+        )
+
+    raw1 = _ask()
+    print("\n[ARCH RAW JSON - first 400 chars]\n", (raw1 or "")[:400])
+
+    try:
+        parsed = safe_parse_json(raw1)
+    except Exception as e:
+        print("\n[ARCH JSON PARSE ERROR 1]", repr(e))
+
+        raw2 = llm_chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user + "\n\nREMINDER: Return ONLY valid JSON. Start with '{' and end with '}'. No extra text."},
+            ],
+            format="json",
+        )
+        print("\n[ARCH RAW JSON RETRY - first 400 chars]\n", (raw2 or "")[:400])
+
+        try:
+            parsed = safe_parse_json(raw2)
+        except Exception as e2:
+            print("\n[ARCH JSON PARSE ERROR 2]", repr(e2))
+            parsed = {"modules": []}
+
+    # Guarantee dict
+    if not isinstance(parsed, dict):
+        parsed = {"modules": []}
+
+    # Guarantee modules list
+    if "modules" not in parsed or not isinstance(parsed["modules"], list):
+        parsed["modules"] = []
+
+    # ✅ Deterministic fallback (never empty)
+    if len(parsed["modules"]) == 0:
+        seen = set()
+        fallback = []
+        for item in catalog:
+            item_path = item["ref"].split(":")[0]
+            if item_path in seen:
+                continue
+
+            sym = item["symbol"]
+            if sym == "FILE_HEADER":
+                sym = Path(item_path).stem  # better than "FILE_HEADER"
+
+            seen.add(item_path)
+            fallback.append({
+                "path": item_path,
+                "responsibility": f"Core module containing {sym}.",
+                "key_symbols": [sym],
+                "citations": [item["id"]],
+            })
+
+            if len(fallback) == 6:
+                break
+
+        parsed["modules"] = fallback
+    
+    parsed = sanitize_arch_json(parsed, catalog, target_modules=6)
+
+
+    return parsed, catalog
